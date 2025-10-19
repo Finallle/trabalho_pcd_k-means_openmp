@@ -13,6 +13,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <omp.h>
 
 /* ---------- util CSV 1D: cada linha tem 1 número ---------- */
 static int count_rows(const char *path){
@@ -79,8 +80,12 @@ static void write_centroids_csv(const char *path, const double *C, int K){
 
 /* ---------- k-means 1D ---------- */
 /* assignment: para cada X[i], encontra c com menor (X[i]-C[c])^2 */
+
 static double assignment_step_1d(const double *X, const double *C, int *assign, int N, int K){
     double sse = 0.0;
+
+    
+    #pragma omp parallel for reduction(+:sse) schedule(static)
     for(int i=0;i<N;i++){
         int best = -1;
         double bestd = 1e300;
@@ -89,11 +94,12 @@ static double assignment_step_1d(const double *X, const double *C, int *assign, 
             double d = diff*diff;
             if(d < bestd){ bestd = d; best = c; }
         }
-        assign[i] = best;
-        sse += bestd;
+        assign[i] = best;  
+        sse += bestd;       //aqui se combina com o reduction que a gente usa lá em cima
     }
     return sse;
 }
+
 
 /* update: média dos pontos de cada cluster (1D)
    se cluster vazio, copia X[0] (estratégia naive) */
@@ -158,13 +164,13 @@ int main(int argc, char **argv){
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
 
-    clock_t t0 = clock();
+    clock_t t0 = omp_get_wtime(); 
     int iters = 0; double sse = 0.0;
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
-    clock_t t1 = clock();
+    clock_t t1 = omp_get_wtime(); 
     double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
 
-    printf("K-means 1D (naive)\n");
+    printf("K-means 1D (paralelo)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
     printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
 
