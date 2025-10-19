@@ -164,7 +164,8 @@ static void kmeans_1d(const double *X, double *C, int *assign,
 
 /* ---------- main ---------- */
 int main(int argc, char **argv){
-    //omp_set_num_threads(4);
+    int num_threads = (argc>7)? atoi(argv[7]) : 2
+    omp_set_num_threads(num_threads);
 
     if(argc < 3){
         printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]\n", argv[0]);
@@ -193,11 +194,11 @@ int main(int argc, char **argv){
     int iters = 0; double sse = 0.0;
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
     clock_t t1 = clock();
-    double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
+    double ms = (t1 - t0) * 1000;
 
     printf("K-means 1D (naive)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
-    printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
+    printf("Iterações: %d | SSE final: %.6f | Tempo: %lf ms\n", iters, sse, ms);
 
     write_assign_csv(outAssign, assign, N);
     write_centroids_csv(outCentroid, C, K);
