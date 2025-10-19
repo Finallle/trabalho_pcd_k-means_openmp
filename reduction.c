@@ -95,30 +95,59 @@ static double assignment_step_1d(const double *X, const double *C, int *assign, 
             if(d < bestd){ bestd = d; best = c; }
         }
         assign[i] = best;  
-        sse += bestd;       //aqui se combina com o reduction que a gente usa lá em cima
+        sse += bestd;       //aqui se combina com o reduction que a gente usa lá em cima, eu acho
     }
     return sse;
 }
 
 
-/* update: média dos pontos de cada cluster (1D)
-   se cluster vazio, copia X[0] (estratégia naive) */
-static void update_step_1d(const double *X, double *C, const int *assign, int N, int K){
-    double *sum = (double*)calloc((size_t)K, sizeof(double));
-    int *cnt = (int*)calloc((size_t)K, sizeof(int));
-    if(!sum || !cnt){ fprintf(stderr,"Sem memoria no update\n"); exit(1); }
 
-    for(int i=0;i<N;i++){
-        int a = assign[i];
-        cnt[a] += 1;
-        sum[a] += X[i];
+/* update: média dos pontos de cada cluster (1D) */
+static void update_step_1d(const double *X, double *C, const int *assign, int N, int K){
+    // acumuladores finais
+    double *sum = (double*)calloc((size_t)K, sizeof(double));
+    int    *cnt = (int*)calloc((size_t)K, sizeof(int));
+    if (!sum || !cnt) { fprintf(stderr,"Sem memoria no update\n"); exit(1); }
+
+    // buffers por thread: layout [thread][K] “contiguado” em 1D
+    int T = omp_get_max_threads();
+    double *sumT = (double*)calloc((size_t)T * K, sizeof(double));
+    int    *cntT = (int*)calloc((size_t)T * K, sizeof(int));
+    if (!sumT || !cntT) { fprintf(stderr,"Sem memoria nos buffers por thread\n"); exit(1); }
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        double *sum_loc = sumT + (size_t)tid * K;
+        int    *cnt_loc = cntT + (size_t)tid * K;
+
+        #pragma omp for schedule(static)
+        for (int i = 0; i < N; i++) {
+            int a = assign[i];
+            sum_loc[a] += X[i];
+            cnt_loc[a] += 1;
+        }
+    } // fim da região paralela
+
+    // redução 
+    for (int c = 0; c < K; c++) {
+        double s = 0.0; int n = 0;
+        for (int t = 0; t < T; t++) {
+            s += sumT[t*K + c];
+            n += cntT[t*K + c];
+        }
+        sum[c] = s; cnt[c] = n;
     }
-    for(int c=0;c<K;c++){
-        if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
+
+    // calcula centróides
+    for (int c = 0; c < K; c++) {
+        C[c] = (cnt[c] > 0) ? sum[c] / (double)cnt[c] : X[0]; // política para cluster vazio
     }
-    free(sum); free(cnt);
+
+    free(sumT); free(cntT);
+    free(sum);  free(cnt);
 }
+
 
 static void kmeans_1d(const double *X, double *C, int *assign,
                       int N, int K, int max_iter, double eps,
@@ -164,11 +193,12 @@ int main(int argc, char **argv){
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
 
-    clock_t t0 = omp_get_wtime(); 
-    int iters = 0; double sse = 0.0;
+    double t0 = omp_get_wtime();
+    int iters = 0; 
+    double sse = 0.0;
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
-    clock_t t1 = omp_get_wtime(); 
-    double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
+    double t1 = omp_get_wtime();
+    double ms = (t1 - t0) * 1000.0;
 
     printf("K-means 1D (paralelo)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
