@@ -13,6 +13,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <omp.h>
 
 /* ---------- util CSV 1D: cada linha tem 1 número ---------- */
 static int count_rows(const char *path){
@@ -81,10 +82,12 @@ static void write_centroids_csv(const char *path, const double *C, int K){
 /* assignment: para cada X[i], encontra c com menor (X[i]-C[c])^2 */
 static double assignment_step_1d(const double *X, const double *C, int *assign, int N, int K){
     double sse = 0.0;
-    for(int i=0;i<N;i++){
+    int i, c;
+    #pragma omp parallel for reduction(+:sse) private(c)
+    for(i=0;i<N;i++){
         int best = -1;
         double bestd = 1e300;
-        for(int c=0;c<K;c++){
+        for(c=0;c<K;c++){
             double diff = X[i] - C[c];
             double d = diff*diff;
             if(d < bestd){ bestd = d; best = c; }
@@ -97,22 +100,48 @@ static double assignment_step_1d(const double *X, const double *C, int *assign, 
 
 /* update: média dos pontos de cada cluster (1D)
    se cluster vazio, copia X[0] (estratégia naive) */
-static void update_step_1d(const double *X, double *C, const int *assign, int N, int K){
+static void update_step_1d(const double *X, double *C, const int *assign, int N, int K) {
     double *sum = (double*)calloc((size_t)K, sizeof(double));
     int *cnt = (int*)calloc((size_t)K, sizeof(int));
     if(!sum || !cnt){ fprintf(stderr,"Sem memoria no update\n"); exit(1); }
 
-    for(int i=0;i<N;i++){
-        int a = assign[i];
-        cnt[a] += 1;
-        sum[a] += X[i];
+    #pragma omp parallel
+    {
+        double *sum_local = (double*)calloc((size_t)K, sizeof(double));
+        int *cnt_local = (int*)calloc((size_t)K, sizeof(int));
+        if(!sum_local || !cnt_local){ fprintf(stderr,"Sem memoria local no update\n"); exit(1); }
+
+        #pragma omp for nowait
+        for (int i = 0; i < N; i++) {
+            int a = assign[i];
+            cnt_local[a] += 1;
+            sum_local[a] += X[i];
+        }
+
+        /* redução manual */
+        #pragma omp critical
+        {
+            for (int c = 0; c < K; c++) {
+                sum[c] += sum_local[c];
+                cnt[c] += cnt_local[c];
+            }
+        }
+
+        free(sum_local);
+        free(cnt_local);
     }
-    for(int c=0;c<K;c++){
-        if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
+
+    for (int c = 0; c < K; c++) {
+        if (cnt[c] > 0)
+            C[c] = sum[c] / (double)cnt[c];
+        else
+            C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
     }
-    free(sum); free(cnt);
+
+    free(sum);
+    free(cnt);
 }
+
 
 static void kmeans_1d(const double *X, double *C, int *assign,
                       int N, int K, int max_iter, double eps,
@@ -135,6 +164,8 @@ static void kmeans_1d(const double *X, double *C, int *assign,
 
 /* ---------- main ---------- */
 int main(int argc, char **argv){
+    //omp_set_num_threads(4);
+
     if(argc < 3){
         printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]\n", argv[0]);
         printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
