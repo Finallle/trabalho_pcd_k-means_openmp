@@ -164,7 +164,7 @@ static void kmeans_1d(const double *X, double *C, int *assign,
 
 /* ---------- main ---------- */
 int main(int argc, char **argv){
-    int num_threads = (argc>7)? atoi(argv[7]) : 2
+    int num_threads = (argc>7)? atoi(argv[7]) : 2;
     omp_set_num_threads(num_threads);
 
     if(argc < 3){
@@ -190,11 +190,11 @@ int main(int argc, char **argv){
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
 
-    clock_t t0 = clock();
+    double t0 = omp_get_wtime();
     int iters = 0; double sse = 0.0;
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
-    clock_t t1 = clock();
-    double ms = (t1 - t0) * 1000;
+    double t1 = omp_get_wtime();
+    double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
 
     printf("K-means 1D (naive)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
