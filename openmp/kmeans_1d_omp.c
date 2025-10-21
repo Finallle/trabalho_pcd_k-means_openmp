@@ -83,7 +83,9 @@ static void write_centroids_csv(const char *path, const double *C, int K){
 
 static double assignment_step_1d(const double *X, const double *C, int *assign, int N, int K){
     double sse = 0.0;
-    #pragma omp parallel for reduction(+:sse) schedule(runtime)
+
+    
+    #pragma omp parallel for reduction(+:sse) schedule(static)
     for(int i=0;i<N;i++){
         int best = -1;
         double bestd = 1e300;
@@ -107,7 +109,7 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
     int    *cnt = (int*)calloc((size_t)K, sizeof(int));
     if (!sum || !cnt) { fprintf(stderr,"Sem memoria no update\n"); exit(1); }
 
-    // buffers por thread: layout [thread][K] “contiguado” em 1D
+   
     int T = omp_get_max_threads();
     double *sumT = (double*)calloc((size_t)T * K, sizeof(double));
     int    *cntT = (int*)calloc((size_t)T * K, sizeof(int));
@@ -119,13 +121,14 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
         double *sum_loc = sumT + (size_t)tid * K;
         int    *cnt_loc = cntT + (size_t)tid * K;
 
-        #pragma omp for schedule(runtime)
+        #pragma omp for schedule(static)
         for (int i = 0; i < N; i++) {
             int a = assign[i];
             sum_loc[a] += X[i];
             cnt_loc[a] += 1;
         }
-    } // fim da região paralela
+    }
+     // fim da região paralela
 
     // redução 
     for (int c = 0; c < K; c++) {
@@ -201,12 +204,6 @@ int main(int argc, char **argv){
     printf("K-means 1D (paralelo)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
     printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
-
-    omp_sched_t kind;
-    int chunk;
-
-    omp_get_schedule(&kind, &chunk);
-    printf("Chunk size = %d\n", chunk);
 
     write_assign_csv(outAssign, assign, N);
     write_centroids_csv(outCentroid, C, K);
