@@ -83,6 +83,8 @@ static double assignment_step_1d(const double *X, const double *C, int *assign, 
         assign[i] = best;
         sse += bestd;
     }
+    double g_sse;
+    MPI_Reduce(&sse, &g_sse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     return sse;
 }
 
@@ -100,7 +102,7 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
     }
     for(int c=0;c<K;c++){
         if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
+        else C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
     }
     free(sum); free(cnt);
 }
@@ -137,8 +139,7 @@ int main(int argc, char **argv){
     double eps = (argc>4)? atof(argv[4]) : 1e-4;
     const char *outAssign = (argc>5)? argv[5] : NULL;
     const char *outCentroid = (argc>6)? argv[6] : NULL;
-    int processId, mainId = 0, nameSize, noProcesses = (argc>7)? argv[7] : 2;
-    char computerName[MPI_MAX_PROCESSOR_NAME];
+    int processId, mainId = 0, nameSize, numProcesses = (argc>7)? argv[7] : 2;
 
     if(max_iter <= 0 || eps <= 0.0){
         fprintf(stderr,"Parâmetros inválidos: max_iter>0 e eps>0\n");
@@ -146,17 +147,27 @@ int main(int argc, char **argv){
     }
 
     MPI_Init(&argc, &argv);
-    MPI_Comm_size(MPI_COMM_WORLD, &noProcesses);
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
     MPI_Comm_rank(MPI_COMM_WORLD, &processId);
-    MPI_Get_processor_name(computerName, nameSize);
+
+    double *X, *C;
+    int *assign;
 
     if(processId == mainId) {
       int N=0, K=0;
-      double *X = read_csv_1col(pathX, &N);
-      double *C = read_csv_1col(pathC, &K);
-      int *assign = (int*)malloc((size_t)N * sizeof(int));
+      X = read_csv_1col(pathX, &N);
+      C = read_csv_1col(pathC, &K);
+      assign = (int*)malloc((size_t)N * sizeof(int));
       if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
     }
+
+    int c = count_rows(pathC);
+    int x = count_rows(pathX);
+
+    // Realiza um broadcast com todos os processos para enviar C base 
+    MPI_Bcast(&C, c, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
+    MPI_Bcast(&X, x, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
+    MPI_Bcast(&assign, N, MPI_INT, mainId, MPI_COMM_WORLD);
 
     clock_t t0 = clock();
     int iters = 0; double sse = 0.0;
