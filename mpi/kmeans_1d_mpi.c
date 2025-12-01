@@ -139,7 +139,7 @@ int main(int argc, char **argv){
     double eps = (argc>4)? atof(argv[4]) : 1e-4;
     const char *outAssign = (argc>5)? argv[5] : NULL;
     const char *outCentroid = (argc>6)? argv[6] : NULL;
-    int processId, mainId = 0, nameSize, numProcesses = (argc>7)? argv[7] : 2;
+    int processId, mainId = 0, nameSize, numProcesses = (argc>7)? atoi(argv[7]) : 2;
 
     if(max_iter <= 0 || eps <= 0.0){
         fprintf(stderr,"Parâmetros inválidos: max_iter>0 e eps>0\n");
@@ -150,23 +150,19 @@ int main(int argc, char **argv){
     MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
     MPI_Comm_rank(MPI_COMM_WORLD, &processId);
 
-    double *X, *C;
     int *assign;
+    int N=0, K=0;
+    double *X = read_csv_1col(pathX, &N);
+    double *C = read_csv_1col(pathC, &K);
 
     if(processId == mainId) {
-      int N=0, K=0;
-      X = read_csv_1col(pathX, &N);
-      C = read_csv_1col(pathC, &K);
       assign = (int*)malloc((size_t)N * sizeof(int));
       if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
     }
 
-    int c = count_rows(pathC);
-    int x = count_rows(pathX);
-
     // Realiza um broadcast com todos os processos para enviar C base 
-    MPI_Bcast(&C, c, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
-    MPI_Bcast(&X, x, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
+    MPI_Bcast(&C, K, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
+    MPI_Bcast(&X, N, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
     MPI_Bcast(&assign, N, MPI_INT, mainId, MPI_COMM_WORLD);
 
     clock_t t0 = clock();
@@ -175,7 +171,7 @@ int main(int argc, char **argv){
     clock_t t1 = clock();
     double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
 
-    printf("K-means 1D (naive)\n");
+    printf("K-means 1D (MPI)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
     printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
 
