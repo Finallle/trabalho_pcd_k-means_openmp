@@ -83,14 +83,13 @@ static double assignment_step_1d(const double *X, const double *C, int *assign, 
         assign[i] = best;
         sse += bestd;
     }
-    double g_sse;
-    MPI_Reduce(&sse, &g_sse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     return sse;
 }
 
 /* update: média dos pontos de cada cluster (1D)
    se cluster vazio, copia X[0] (estratégia naive) */
-static void update_step_1d(const double *X, double *C, const int *assign, int N, int K){
+static void update_step_1d(const double *X, double *C, 
+    const int *assign, int N, int K, double *sum_global, int *cnt_global){
     double *sum = (double*)calloc((size_t)K, sizeof(double));
     int *cnt = (int*)calloc((size_t)K, sizeof(int));
     if(!sum || !cnt){ fprintf(stderr,"Sem memoria no update\n"); exit(1); }
@@ -100,11 +99,17 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
         cnt[a] += 1;
         sum[a] += X[i];
     }
+
+    MPI_Allreduce(sum, sum_global, K, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(cnt, cnt_global, K, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
     for(int c=0;c<K;c++){
         if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
         else C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
     }
-    free(sum); free(cnt);
+
+    free(sum);
+    free(cnt);
 }
 
 static void kmeans_1d(const double *X, double *C, int *assign,
@@ -112,26 +117,38 @@ static void kmeans_1d(const double *X, double *C, int *assign,
                       int *iters_out, double *sse_out)
 {
     double prev_sse = 1e300;
-    double sse = 0.0;
     int it;
+    double g_sse = 0.0;
+    double *sum_global = (double*)calloc((size_t)K, sizeof(double));
+    int *cnt_global = (int*)calloc((size_t)K, sizeof(int));
+    if(!sum_global || !cnt_global){ fprintf(stderr,"Sem memoria nos parâmetros globais.\n"); exit(1); }
+
     for(it=0; it<max_iter; it++){
-        sse = assignment_step_1d(X, C, assign, N, K);
+        double sse = assignment_step_1d(X, C, assign, N, K);
+
+        MPI_Reduce(&sse, &g_sse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
         /* parada por variação relativa do SSE */
         double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
         if(rel < eps){ it++; break; }
-        update_step_1d(X, C, assign, N, K);
+        update_step_1d(X, C, assign, N, K, sum_global, cnt_global);
+
         prev_sse = sse;
     }
     *iters_out = it;
-    *sse_out = sse;
+    *sse_out = g_sse;
+    free(sum_global);
+    free(cnt_global);
 }
 
 /* ---------- main ---------- */
 int main(int argc, char **argv){
+    MPI_Init(&argc, &argv);
+
     if(argc < 3){
-        printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv] [no_processes=2]\n", argv[0]);
-        printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
-        return 1;
+      printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv] [no_processes=2]\n", argv[0]);
+      printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
+      return 1;
     }
     const char *pathX = argv[1];
     const char *pathC = argv[2];
@@ -142,32 +159,73 @@ int main(int argc, char **argv){
     int processId, mainId = 0, nameSize, numProcesses = (argc>7)? atoi(argv[7]) : 2;
 
     if(max_iter <= 0 || eps <= 0.0){
-        fprintf(stderr,"Parâmetros inválidos: max_iter>0 e eps>0\n");
-        return 1;
+      fprintf(stderr,"Parâmetros inválidos: max_iter>0 e eps>0\n");
+      return 1;
     }
 
-    MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
     MPI_Comm_rank(MPI_COMM_WORLD, &processId);
 
-    int *assign;
+    double *X, *C;
     int N=0, K=0;
-    double *X = read_csv_1col(pathX, &N);
-    double *C = read_csv_1col(pathC, &K);
 
     if(processId == mainId) {
-      assign = (int*)malloc((size_t)N * sizeof(int));
-      if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
+      C = read_csv_1col(pathC, &K);
+      X = read_csv_1col(pathX, &N);
     }
 
-    // Realiza um broadcast com todos os processos para enviar C base 
-    MPI_Bcast(&C, K, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
-    MPI_Bcast(&X, N, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
-    MPI_Bcast(&assign, N, MPI_INT, mainId, MPI_COMM_WORLD);
+    // Broadcast de N e K
+    MPI_Bcast(&N, 1, MPI_INT, mainId, MPI_COMM_WORLD);
+    MPI_Bcast(&K, 1, MPI_INT, mainId, MPI_COMM_WORLD);
+
+    // Realiza um broadcast com todos os processos para enviar C 
+    MPI_Bcast(C, K, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
+
+    int divpoints = N / numProcesses;
+    int remainder = N % numProcesses;
+
+    if(processId < remainder) divpoints++;
+
+    double *Xlocal = (double*)malloc(divpoints * sizeof(double));
+
+    if(!Xlocal) { 
+      fprintf(stderr,"Sem memoria para X local\n");
+      free(X);
+      free(C);
+      return 1;
+    }
+
+    int *sendcounts = NULL, *displs = NULL;
+
+    if(processId == mainId){
+      sendcounts = (int*)malloc(numProcesses * sizeof(int));
+      displs = (int*)malloc(numProcesses * sizeof(int));
+
+      for(int r=0;r<numProcesses;r++)
+        sendcounts[r] = (r < remainder)? divpoints + 1 : divpoints;
+
+      displs[0] = 0;
+
+      for(int r=1;r<numProcesses;r++)
+        displs[r] = displs[r-1] + sendcounts[r-1];
+    }
+
+    MPI_Scatterv(X, sendcounts, displs, MPI_DOUBLE,
+             Xlocal, divpoints, MPI_DOUBLE,
+             0, MPI_COMM_WORLD);
+
+    int *assign = (int*)malloc((size_t)divpoints * sizeof(int));
+
+    if(!assign) { 
+      fprintf(stderr,"Sem memoria para assign\n");
+      free(X);
+      free(C);
+      return 1;
+    }
 
     clock_t t0 = clock();
     int iters = 0; double sse = 0.0;
-    kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
+    kmeans_1d(Xlocal, C, assign, divpoints, K, max_iter, eps, &iters, &sse);
     clock_t t1 = clock();
     double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
 
