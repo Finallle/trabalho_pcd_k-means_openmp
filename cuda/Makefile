@@ -1,0 +1,7 @@
+all: kmeans_1d_cuda cuda
+
+kmeans_1d_cuda: kmeans_1d_cuda.cu
+	nvcc -O2 kmeans_1d_cuda.cu -o kmeans_1d_cuda
+
+cuda: kmeans_1d_cuda
+	./kmeans_1d_cuda dados_big.csv centroides_k64.csv 50 0.000001 assign.csv cent
