@@ -82,26 +82,22 @@ static void write_centroids_csv(const char *path, const double *C, int K){
 
 /* ---------- k-means 1D ---------- */
 /* assignment: para cada X[i], encontra c com menor (X[i]-C[c])^2 */
-__global__ static double assignment_step_1d(const double *X, const double *C, int *assign, int N, int K){
-    double sse = 0.0;
+__global__ void assignment_step_1d(const double *X, int *assign, int N, int K, double* sse_per_point){
     int index = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
+    //int stride = blockDim.x * gridDim.x;
 
-    for(int i = index; i < N; i += stride){
-        int best = -1;
-        double bestd = 1e300;
-        for(int c = 0; c < K; c++){
-            double diff = X[i] - C[c];
-            double d = diff*diff;
-            if(d < bestd){ bestd = d; best = c; }
-        }
-        assign[i] = best;
-        sse += bestd;
+    if(index >= N) return;
 
-        __syncthreads();
+    int best = -1;
+    double bestd = 1e300;
+    for(int c = 0; c < K; c++){
+        double diff = X[index] - C_C[c];
+        double d = diff*diff;
+        if(d < bestd){ bestd = d; best = c; }
     }
 
-    return sse;
+    assign[index] = best;
+    sse_per_point[index] += bestd;
 }
 
 /* update: média dos pontos de cada cluster (1D)
@@ -125,33 +121,48 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
 
 static void kmeans_1d(const double *X, double *C, int *assign,
                       int N, int K, int max_iter, double eps,
-                      int *iters_out, double *sse_out, int blockSize)
+                      int *iters_out, double *sse_out, int blockSize, double* sse_per_point_h)
 {
     double prev_sse = 1e300;
     double sse = 0.0;
     int it;
 
-    double *X_device;
+    double *X_device, *sse_per_point_d;
     int *assign_device;
+
 
     gpuErrchk(cudaMalloc((void**)&X_device, sizeof(double) * N));
     gpuErrchk(cudaMalloc((void**)&assign_device, (size_t)N * sizeof(int));
     gpuErrchk(cudaMemcpy(X, X_device, N * sizeof(double), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpyToSymbol(centroids, C, N * sizeof(double)));
+    gpuErrchk(cudaMemcpy(assign, assign_device, N * sizeof(double), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpyToSymbol(C_C, C, N * sizeof(double)));
+
+    gpuErrchk(cudaMalloc((void**)&sse_per_point_d, sizeof(double) * N));
+    gpuErrchk(cudaMemcpy(sse_per_point_h, sse_per_point_d, N * sizeof(double), cudaMemcpyHostToDevice));
 
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
 
     int numBlocks = (N + blockSize - 1) / blockSize; // Out of the Blocks
+    for(it=0; it<max_iter; it++){
+        assignment_step_1d<<<numBlocks, blockSize>>>(X_device, assign_device, N, K, sse_per_point_d);
 
-    //for(it=0; it<max_iter; it++){
-        sse = assignment_step_1d<<<numBlocks, blockSize>>>(X_device, C_device, assign_device, N, K);
+        gpuErrchk(cudaMemcpy(sse_per_point_d, sse_per_point_h, N * sizeof(double), cudaMemcpyDeviceToHost));
+
+        for(int i = 0; i < N; i++)
+            sse += sse_per_point_h[i];
+
         /* parada por variação relativa do SSE */
         double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
         if(rel < eps){ it++; break; }
-        update_step_1d(X, C, assign, N, K);
+
+        gpuErrchk(cudaMemcpy(X_device, X, N * sizeof(double), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(assign_device, assign, N * sizeof(double), cudaMemcpyDeviceToHost));
+
+        update_step_1d(X, C_C, assign, N, K);
+
         prev_sse = sse;
-    //}
+    }
     *iters_out = it;
     *sse_out = sse;
 }
@@ -178,10 +189,16 @@ int main(int argc, char **argv){
     int N=0, K=0;
     double *X = read_csv_1col(pathX, &N);
     double *C = read_csv_1col(pathC, &K);
+    cudaEvent_t start, stop;
     int *assign = (int*)malloc((size_t)N * sizeof(int));
-    if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
+    double *sse_per_point_h = (double*)malloc((size_t)N * sizeof(double));
 
+    if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
+    if(!sse_per_point_h){ fprintf(stderr,"Sem memoria para sse_per_point_h\n"); free(X); free(C); return 1; }
+
+    cudaEventRecord(start);
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse, blockSize);
+    cudaEventRecord(stop);
 
     /*
     clock_t t0 = clock();
