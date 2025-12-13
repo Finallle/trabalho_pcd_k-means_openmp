@@ -3,7 +3,19 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <cuda_runtime.h>
+#include <cuda_runtime.h> // CUDA API library
+
+#define MAX_CENTROID_INPUT 100
+
+__constant__ double C_C[MAX_CENTROID_INPUT]; // Let's declare centroids into constant memory
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true) {
+    if (code != cudaSuccess) {
+        fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
 
 /* ---------- util CSV 1D: cada linha tem 1 número ---------- */
 static int count_rows(const char *path){
@@ -21,7 +33,7 @@ static int count_rows(const char *path){
     return rows;
 }
 
-static double *readevice_csv_1col(const char *path, int *n_out){
+static double *read_csv_1col(const char *path, int *n_out){
     int R = count_rows(path);
     if(R<=0){ fprintf(stderr,"Arquivo vazio: %s\n", path); exit(1); }
     double *A = (double*)malloc((size_t)R * sizeof(double));
@@ -68,22 +80,28 @@ static void write_centroids_csv(const char *path, const double *C, int K){
     fclose(f);
 }
 
-__global__ void assignment_kernel_1d(const double *X, const double *C, int *assign, double *sse, int N, int K) 
+/* ---------- k-means 1D ---------- */
+/* assignment: para cada X[i], encontra c com menor (X[i]-C[c])^2 */
+__global__ static double assignment_step_1d(const double *X, const double *C, int *assign, int N, int K){
+    double sse = 0.0;
     int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
 
-    if (index < N) {
-        double bestd = 1e300;
+    for(int i = index; i < N; i += stride){
         int best = -1;
-
-        for(int c=0;c<K;c++){
-            double diff = X[index] - C[c];
+        double bestd = 1e300;
+        for(int c = 0; c < K; c++){
+            double diff = X[i] - C[c];
             double d = diff*diff;
             if(d < bestd){ bestd = d; best = c; }
         }
+        assign[i] = best;
+        sse += bestd;
 
-        assign[index] = best;
-        sse[index] += bestd;
+        __syncthreads();
     }
+
+    return sse;
 }
 
 /* update: média dos pontos de cada cluster (1D)
@@ -100,74 +118,40 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
     }
     for(int c=0;c<K;c++){
         if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
+        else C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
     }
     free(sum); free(cnt);
 }
 
-static void cuda_kmeans_1d(const double *host_X, double *host_C, int *assign_host, double* host_sse
-                          int N, int K, int max_iter, double eps,
-                          int *iters_out, double *sse_out) {
-    double *device_X, *device_C, *device_sse;
-    int *device_assign;
-
-    cudaMalloc((void**)&device_X, (size_t)N * sizeof(double));
-    cudaMalloc((void**)&device_C, (size_t)K * sizeof(double));
-    cudaMalloc((void**)&device_assign, (size_t)N * sizeof(int));
-    cudaMalloc((void**)&device_sse, (size_t)N * sizeof(double));
-
-    cudaMemcpy(device_X, host_X, (size_t)N * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(device_C, host_C, (size_t)K * sizeof(double), cudaMemcpyHostToDevice);
-
+static void kmeans_1d(const double *X, double *C, int *assign,
+                      int N, int K, int max_iter, double eps,
+                      int *iters_out, double *sse_out, int blockSize)
+{
     double prev_sse = 1e300;
     double sse = 0.0;
     int it;
 
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
+    double *X_device;
+    int *assign_device;
 
-    for(it=0; it<max_iter; it++){
-        assignment_kernel_1d<<<blocks, threads>>>(device_X, device_C, device_assign, device_sse, N, K);
-        cudaMemcpy(assign_host, device_assign, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost);
-        cudaMemcpy(host_sse, device_sse, (size_t)N * sizeof(double), cudaMemcpyDeviceToHost);
+    gpuErrchk(cudaMalloc((void**)&X_device, sizeof(double) * N));
+    gpuErrchk(cudaMalloc((void**)&assign_device, (size_t)N * sizeof(int));
+    gpuErrchk(cudaMemcpy(X, X_device, N * sizeof(double), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpyToSymbol(centroids, C, N * sizeof(double)));
 
-        sse = 0.0;
-        for(int i=0;i<N;i++) sse += host_sse[i];
+    gpuErrchk(cudaPeekAtLastError());
+    gpuErrchk(cudaDeviceSynchronize());
 
-        double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
-        if(rel < eps){ it++; break; }
+    int numBlocks = (N + blockSize - 1) / blockSize; // Out of the Blocks
 
-        prev_sse = sse;
-
-        cudaMemcpy(host_assign, device_assign, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost);
-        update_step_1d_host(host_X, host_C, host_assign, N, K);
-        cudaMemcpy(device_C, host_C, (size_t)K * sizeof(double), cudaMemcpyHostToDevice);
-    }
-
-    *iters_out = it;
-    *sse_out = sse;
-
-    free(host_sse);
-    cudaFree(d_X);
-    cudaFree(d_C);
-    cudaFree(d_assign);
-    cudaFree(d_err);
-}
-
-static void kmeans_1d(const double *X, double *C, int *assign,
-                      int N, int K, int max_iter, double eps,
-                      int *iters_out, double *sse_out)
-{
-
-
-    for(it=0; it<max_iter; it++){
-        sse = assignment_step_1d(X, C, assign, N, K);
+    //for(it=0; it<max_iter; it++){
+        sse = assignment_step_1d<<<numBlocks, blockSize>>>(X_device, C_device, assign_device, N, K);
         /* parada por variação relativa do SSE */
         double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
         if(rel < eps){ it++; break; }
         update_step_1d(X, C, assign, N, K);
         prev_sse = sse;
-    }
+    //}
     *iters_out = it;
     *sse_out = sse;
 }
@@ -175,7 +159,7 @@ static void kmeans_1d(const double *X, double *C, int *assign,
 /* ---------- main ---------- */
 int main(int argc, char **argv){
     if(argc < 3){
-        printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]\n", argv[0]);
+        printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv] [blocksSize=1] \n", argv[0]);
         printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
         return 1;
     }
@@ -192,16 +176,20 @@ int main(int argc, char **argv){
     }
 
     int N=0, K=0;
-    double *X = readevice_csv_1col(pathX, &N);
-    double *C = readevice_csv_1col(pathC, &K);
+    double *X = read_csv_1col(pathX, &N);
+    double *C = read_csv_1col(pathC, &K);
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
 
+    kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse, blockSize);
+
+    /*
     clock_t t0 = clock();
     int iters = 0; double sse = 0.0;
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
     clock_t t1 = clock();
     double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
+    */
 
     printf("K-means 1D (naive)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
