@@ -156,10 +156,10 @@ int main(int argc, char **argv){
     double eps = (argc>4)? atof(argv[4]) : 1e-4;
     const char *outAssign = (argc>5)? argv[5] : NULL;
     const char *outCentroid = (argc>6)? argv[6] : NULL;
-    int numProcesses = (argc>7)? atoi(argv[7]) : 2;
+    int numProcesses;
 
     if(processId == mainId && argc < 3){
-      printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv] [no_processes=2]\n", argv[0]);
+      printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]\n", argv[0]);
       printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
       MPI_Abort(MPI_COMM_WORLD, 1);
       return 1;
@@ -215,11 +215,11 @@ int main(int argc, char **argv){
         sendcounts = (int*)malloc(numProcesses * sizeof(int));
         displs = (int*)malloc(numProcesses * sizeof(int));
         int s = 0;
-        for (int i = 0; i < size; i++) {
+        for (int i = 0; i < numProcesses; i++) {
             sendcounts[i] = divpoints;
             if (i < remainder) sendcounts[i]++;
-            displs[i] = sum;
-            sum += sendcounts[i];
+            displs[i] = s;
+            s += sendcounts[i];
         }
     }
 
@@ -235,6 +235,9 @@ int main(int argc, char **argv){
       free(C);
       return 1;
     }
+
+    int iters = 0;
+    double sse = 0.0;
 
     double start = MPI_Wtime();
     kmeans_1d(X_local, C, assign, divpoints, K, max_iter, eps, &iters, &sse);
