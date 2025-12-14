@@ -3,13 +3,19 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <cuda_runtime.h> // CUDA API library
+#include <cuda_runtime.h>
 
 #define MAX_CENTROID_INPUT 100
 
-__constant__ double C_C[MAX_CENTROID_INPUT]; // Let's declare centroids into constant memory
+__constant__ double C_C[MAX_CENTROID_INPUT];
 
-/* ---------- util CSV 1D: cada linha tem 1 número ---------- */
+static void cuda_check(cudaError_t e, const char *msg){
+    if(e != cudaSuccess){
+        fprintf(stderr, "CUDA error: %s: %s\n", msg, cudaGetErrorString(e));
+        exit(1);
+    }
+}
+
 static int count_rows(const char *path){
     FILE *f = fopen(path, "r");
     if(!f){ fprintf(stderr,"Erro ao abrir %s\n", path); exit(1); }
@@ -43,16 +49,15 @@ static double *read_csv_1col(const char *path, int *n_out){
         }
         if(only_ws) continue;
 
-        /* aceita vírgula/ponto-e-vírgula/espaco/tab, pega o primeiro token numérico */
         const char *delim = ",; \t";
         char *tok = strtok(line, delim);
         if(!tok){ fprintf(stderr,"Linha %d sem valor em %s\n", r+1, path); free(A); fclose(f); exit(1); }
         A[r] = atof(tok);
         r++;
-        if(r>R) break;
+        if(r>=R) break;
     }
     fclose(f);
-    *n_out = R;
+    *n_out = r;
     return A;
 }
 
@@ -72,30 +77,23 @@ static void write_centroids_csv(const char *path, const double *C, int K){
     fclose(f);
 }
 
-/* ---------- k-means 1D ---------- */
-/* assignment: para cada X[i], encontra c com menor (X[i]-C[c])^2 */
-__global__ void assignment_step_1d(const double *X, int *assign, int N, int K, double* sse_per_point){
+__global__ void assignment_step_1d(const double *X, int *assign, int N, int K, double *sse_per_point){
     int index = blockIdx.x * blockDim.x + threadIdx.x;
-    //int stride = blockDim.x * gridDim.x;
-
     if(index >= N) return;
 
-    int best = -1;
+    int best = 0;
     double bestd = 1e300;
+
     for(int c = 0; c < K; c++){
         double diff = X[index] - C_C[c];
-        double d = diff*diff;
+        double d = diff * diff;
         if(d < bestd){ bestd = d; best = c; }
     }
 
-    __syncthreads();
-
     assign[index] = best;
-    sse_per_point[index] += bestd;
+    sse_per_point[index] = bestd;
 }
 
-/* update: média dos pontos de cada cluster (1D)
-   se cluster vazio, copia X[0] (estratégia naive) */
 static void update_step_1d(const double *X, double *C, const int *assign, int N, int K){
     double *sum = (double*)calloc((size_t)K, sizeof(double));
     int *cnt = (int*)calloc((size_t)K, sizeof(int));
@@ -103,109 +101,135 @@ static void update_step_1d(const double *X, double *C, const int *assign, int N,
 
     for(int i=0;i<N;i++){
         int a = assign[i];
+        if(a < 0 || a >= K) continue;
         cnt[a] += 1;
         sum[a] += X[i];
     }
     for(int c=0;c<K;c++){
         if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
+        else C[c] = X[0];
     }
     free(sum); free(cnt);
 }
 
 static void kmeans_1d(double *X, double *C, int *assign,
                       int N, int K, int max_iter, double eps,
-                      int *iters_out, double *sse_out, int blockSize, double* sse_per_point_h,
-                      float* t_h2d, float* t_d2h, float* t_kernel)
+                      int *iters_out, double *sse_out, int blockSize,
+                      double *sse_per_point_h,
+                      float *t_h2d, float *t_d2h, float *t_kernel)
 {
+    if(K <= 0 || N <= 0){
+        *iters_out = 0;
+        *sse_out = 0.0;
+        return;
+    }
+    if(K > MAX_CENTROID_INPUT){
+        fprintf(stderr, "ERRO: K=%d > MAX_CENTROID_INPUT=%d\n", K, MAX_CENTROID_INPUT);
+        exit(1);
+    }
+    if(blockSize <= 0) blockSize = 256;
+
     double prev_sse = 1e300;
     double sse = 0.0;
-    int it;
+    int it = 0;
 
-    double *X_device, *sse_per_point_d;
-    int *assign_device;
-    cudaEvent_t start, stop;
+    double *X_device = NULL;
+    int *assign_device = NULL;
+    double *sse_per_point_d = NULL;
 
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
+    cudaEvent_t e0, e1;
+    cuda_check(cudaEventCreate(&e0), "cudaEventCreate e0");
+    cuda_check(cudaEventCreate(&e1), "cudaEventCreate e1");
 
-    cudaMalloc((void**)&X_device, sizeof(double) * N);
-    cudaMalloc((void**)&assign_device, (size_t)N * sizeof(int));
-    cudaMalloc((void**)&sse_per_point_d, sizeof(double) * N);
+    cuda_check(cudaEventRecord(e0), "event record e0");
 
-    cudaMemcpy(X, X_device, N * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(assign, assign_device, N * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpyToSymbol(C_C, C, N * sizeof(double));
-    cudaMemcpy(sse_per_point_h, sse_per_point_d, N * sizeof(double), cudaMemcpyHostToDevice);
+    cuda_check(cudaMalloc((void**)&X_device, (size_t)N * sizeof(double)), "cudaMalloc X_device");
+    cuda_check(cudaMalloc((void**)&assign_device, (size_t)N * sizeof(int)), "cudaMalloc assign_device");
+    cuda_check(cudaMalloc((void**)&sse_per_point_d, (size_t)N * sizeof(double)), "cudaMalloc sse_per_point_d");
 
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(t_h2d, start, stop);
+    cuda_check(cudaMemcpy(X_device, X, (size_t)N * sizeof(double), cudaMemcpyHostToDevice), "H2D X");
+    cuda_check(cudaMemcpy(assign_device, assign, (size_t)N * sizeof(int), cudaMemcpyHostToDevice), "H2D assign");
+    cuda_check(cudaMemcpyToSymbol(C_C, C, (size_t)K * sizeof(double)), "H2D centroids const");
+    cuda_check(cudaMemset(sse_per_point_d, 0, (size_t)N * sizeof(double)), "memset sse_per_point_d");
 
-    cudaPeekAtLastError();
-    cudaDeviceSynchronize();
+    cuda_check(cudaEventRecord(e1), "event record e1");
+    cuda_check(cudaEventSynchronize(e1), "event sync e1");
+    cuda_check(cudaEventElapsedTime(t_h2d, e0, e1), "elapsed h2d");
 
-    int numBlocks = (N + blockSize - 1) / blockSize; // Out of the Blocks
-    
-    float kernel = 0, d2h = 0;
-    for(it=0; it<max_iter; it++){
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
+    int numBlocks = (N + blockSize - 1) / blockSize;
 
-        cudaEventRecord(start);
+    for(it = 0; it < max_iter; it++){
+        sse = 0.0;
+
+        cuda_check(cudaEventRecord(e0), "kernel event start");
+
         assignment_step_1d<<<numBlocks, blockSize>>>(X_device, assign_device, N, K, sse_per_point_d);
-        cudaEventSynchronize(stop);
+        cuda_check(cudaGetLastError(), "kernel launch");
+        cuda_check(cudaDeviceSynchronize(), "kernel sync");
 
-        cudaEventElapsedTime(&kernel, start, stop);
-        *t_kernel += kernel;
+        cuda_check(cudaEventRecord(e1), "kernel event stop");
+        cuda_check(cudaEventSynchronize(e1), "kernel event sync");
+        float ms_kernel = 0.0f;
+        cuda_check(cudaEventElapsedTime(&ms_kernel, e0, e1), "elapsed kernel");
+        *t_kernel += ms_kernel;
 
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-        cudaEventRecord(start);
+        cuda_check(cudaEventRecord(e0), "d2h event start");
 
-        cudaMemcpy(sse_per_point_d, sse_per_point_h, N * sizeof(double), cudaMemcpyDeviceToHost);
+        cuda_check(cudaMemcpy(assign, assign_device, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost), "D2H assign");
+        cuda_check(cudaMemcpy(sse_per_point_h, sse_per_point_d, (size_t)N * sizeof(double), cudaMemcpyDeviceToHost), "D2H sse_per_point");
 
-        for(int i = 0; i < N; i++)
-            sse += sse_per_point_h[i];
+        cuda_check(cudaEventRecord(e1), "d2h event stop");
+        cuda_check(cudaEventSynchronize(e1), "d2h event sync");
+        float ms_d2h = 0.0f;
+        cuda_check(cudaEventElapsedTime(&ms_d2h, e0, e1), "elapsed d2h");
+        *t_d2h += ms_d2h;
 
-        /* parada por variação relativa do SSE */
+        for(int i = 0; i < N; i++) sse += sse_per_point_h[i];
+
         double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
         if(rel < eps){ it++; break; }
 
-        cudaMemcpy(X_device, X, N * sizeof(double), cudaMemcpyDeviceToHost);
-        cudaMemcpy(assign_device, assign, N * sizeof(double), cudaMemcpyDeviceToHost);
+        update_step_1d(X, C, assign, N, K);
 
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&d2h, start, stop);
-        *t_d2h += d2h;
+        cuda_check(cudaEventRecord(e0), "h2d iter event start");
 
-        update_step_1d(X, C_C, assign, N, K);
+        cuda_check(cudaMemcpyToSymbol(C_C, C, (size_t)K * sizeof(double)), "H2D centroids const iter");
+        cuda_check(cudaMemset(sse_per_point_d, 0, (size_t)N * sizeof(double)), "memset sse_per_point_d iter");
+
+        cuda_check(cudaEventRecord(e1), "h2d iter event stop");
+        cuda_check(cudaEventSynchronize(e1), "h2d iter event sync");
+        float ms_h2d_iter = 0.0f;
+        cuda_check(cudaEventElapsedTime(&ms_h2d_iter, e0, e1), "elapsed h2d iter");
+        *t_h2d += ms_h2d_iter;
 
         prev_sse = sse;
     }
 
-    cudaFree(assign_device);
-    cudaFree(X_device);
-    cudaFree(sse_per_point_d);
+    cuda_check(cudaFree(assign_device), "cudaFree assign_device");
+    cuda_check(cudaFree(X_device), "cudaFree X_device");
+    cuda_check(cudaFree(sse_per_point_d), "cudaFree sse_per_point_d");
+
+    cuda_check(cudaEventDestroy(e0), "event destroy e0");
+    cuda_check(cudaEventDestroy(e1), "event destroy e1");
 
     *iters_out = it;
     *sse_out = sse;
 }
 
-/* ---------- main ---------- */
 int main(int argc, char **argv){
     if(argc < 3){
-        printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv] [blockSize=1] \n", argv[0]);
+        printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv] [blockSize=256]\n", argv[0]);
         printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
         return 1;
     }
+
     const char *pathX = argv[1];
     const char *pathC = argv[2];
     int max_iter = (argc>3)? atoi(argv[3]) : 50;
     double eps = (argc>4)? atof(argv[4]) : 1e-4;
     const char *outAssign   = (argc>5)? argv[5] : NULL;
     const char *outCentroid = (argc>6)? argv[6] : NULL;
-    int blockSize = (argc>7) ? atoi(argv[7]) : 1;
+    int blockSize = (argc>7) ? atoi(argv[7]) : 256;
 
     if(max_iter <= 0 || eps <= 0.0){
         fprintf(stderr,"Parâmetros inválidos: max_iter>0 e eps>0\n");
@@ -215,41 +239,60 @@ int main(int argc, char **argv){
     int N=0, K=0;
     double *X = read_csv_1col(pathX, &N);
     double *C = read_csv_1col(pathC, &K);
+
+    if(N <= 0 || K <= 0){
+        fprintf(stderr,"Entrada inválida: N=%d K=%d\n", N, K);
+        free(X); free(C);
+        return 1;
+    }
+
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     double *sse_per_point_h = (double*)malloc((size_t)N * sizeof(double));
-
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
-    if(!sse_per_point_h){ fprintf(stderr,"Sem memoria para sse_per_point_h\n"); free(X); free(C); return 1; }
+    if(!sse_per_point_h){ fprintf(stderr,"Sem memoria para sse_per_point_h\n"); free(assign); free(X); free(C); return 1; }
 
-    int iters = 0; double sse = 0.0;
+    for(int i=0;i<N;i++) assign[i] = 0;
+
+    int iters = 0;
+    double sse = 0.0;
 
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    cuda_check(cudaEventCreate(&start), "event create start");
+    cuda_check(cudaEventCreate(&stop), "event create stop");
 
-    cudaEventRecord(start);
-    float t_h2d = 0.0, t_d2h = 0.0, t_kernel = 0.0;
+    float t_h2d = 0.0f, t_d2h = 0.0f, t_kernel = 0.0f;
+
+    cuda_check(cudaEventRecord(start), "record start");
+
     kmeans_1d(
-        X, C, assign, N, K, max_iter, eps, &iters, &sse, blockSize, sse_per_point_h,
+        X, C, assign, N, K, max_iter, eps,
+        &iters, &sse, blockSize, sse_per_point_h,
         &t_h2d, &t_d2h, &t_kernel
     );
-    cudaEventRecord(stop);
 
-    cudaEventSynchronize(stop);
+    cuda_check(cudaEventRecord(stop), "record stop");
+    cuda_check(cudaEventSynchronize(stop), "sync stop");
 
-    float ms = 0;
-    cudaEventElapsedTime(&ms, start, stop);
+    float ms = 0.0f;
+    cuda_check(cudaEventElapsedTime(&ms, start, stop), "elapsed total");
 
     printf("K-means 1D (CUDA)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
-    printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
-    printf("Tempo kernel: %.2f ms\n", t_kernel);
-    printf("Tempo H2D: %.2f ms\n", t_h2d);
-    printf("Tempo D2H: %.2f ms\n", t_d2h);
+    printf("Iterações: %d | SSE final: %.6f | Tempo: %.3f ms\n", iters, sse, ms);
+    printf("Tempo kernel: %.3f ms\n", t_kernel);
+    printf("Tempo H2D: %.3f ms\n", t_h2d);
+    printf("Tempo D2H: %.3f ms\n", t_d2h);
 
     write_assign_csv(outAssign, assign, N);
     write_centroids_csv(outCentroid, C, K);
 
-    free(assign); free(X); free(C);
+    cuda_check(cudaEventDestroy(start), "destroy start");
+    cuda_check(cudaEventDestroy(stop), "destroy stop");
+
+    free(sse_per_point_h);
+    free(assign);
+    free(X);
+    free(C);
+
     return 0;
 }
