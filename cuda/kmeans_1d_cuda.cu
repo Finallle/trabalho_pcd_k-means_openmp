@@ -236,16 +236,9 @@ int main(int argc, char **argv){
     cudaEventRecord(stop);
 
     cudaEventSynchronize(stop);
+
     float ms = 0;
     cudaEventElapsedTime(&ms, start, stop);
-
-    /*
-    clock_t t0 = clock();
-    int iters = 0; double sse = 0.0;
-    kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
-    clock_t t1 = clock();
-    double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
-    */
 
     printf("K-means 1D (CUDA)\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
