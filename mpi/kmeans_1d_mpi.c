@@ -189,11 +189,11 @@ int main(int argc, char **argv){
     MPI_Bcast(&N, 1, MPI_INT, mainId, MPI_COMM_WORLD);
     MPI_Bcast(&K, 1, MPI_INT, mainId, MPI_COMM_WORLD);
 		
-		if(processId != mainId) {
-      printf("Process %d from %s prepared C and X\n", processId, hostname);
-			C = (double*)malloc(sizeof(double) * K);
-			X = (double*)malloc(sizeof(double) * N);
-		}
+    if(processId != mainId) {
+        printf("Process %d from %s prepared C and X\n", processId, hostname);
+        C = (double*)malloc(sizeof(double) * K);
+        X = (double*)malloc(sizeof(double) * N);
+    }
 
     // Realiza um broadcast com todos os processos para enviar C 
     MPI_Bcast(C, K, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
@@ -254,9 +254,9 @@ int main(int argc, char **argv){
     MPI_Finalize();
 
     if(processId == mainId) {
-			printf("K-means 1D (MPI)\n");
-			printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
-			printf("Iterações: %d | SSE final: %.6f | Tempo: %.4f s\n", iters, sse, end);
+      printf("K-means 1D (MPI)\n");
+      printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
+      printf("Iterações: %d | SSE final: %.6f | Tempo: %.4f s\n", iters, sse, end);
       write_assign_csv(outAssign, assign, N);
       write_centroids_csv(outCentroid, C, K);
     }
