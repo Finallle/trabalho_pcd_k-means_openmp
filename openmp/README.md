@@ -1,4 +1,14 @@
-## Executar e compilar K-means 1-d com OpenMP
+# Executar e compilar K-means 1-d com OpenMP
+
+## Configuração e Preparação
+Antes de executar, você precisa ter a biblioteca do OpenMP instalado em seu host. Em Ubuntu/Debian já vem pré-instalado como uma <i>feature</i> do compilador.
+
+### Arch Linux
+```bash
+sudo pacman -S openmp
+```
+
+## Execução
 
 ```bash
 make omp
