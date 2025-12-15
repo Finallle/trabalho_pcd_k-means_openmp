@@ -148,7 +148,7 @@ static void kmeans_1d(const double *X, double *C, int *assign,
 int main(int argc, char **argv){
     MPI_Init(&argc, &argv);
 
-    int processId, mainId = 0;
+    int processId, mainId = 0; // Using process with rank 0 as the "main"
 
     const char *pathX = argv[1];
     const char *pathC = argv[2];
@@ -162,16 +162,17 @@ int main(int argc, char **argv){
     MPI_Get_processor_name(hostname, &resultlen);
 
     if(processId == mainId && argc < 3){
+      printf("Altere o -np para mudar o número de processos!\n");
       printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]\n", argv[0]);
       printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
-      MPI_Abort(MPI_COMM_WORLD, 1);
-      return 1;
+      MPI_Abort(MPI_COMM_WORLD, -1);
+      return -1;
     }
 
     if(max_iter <= 0 || eps <= 0.0){
       fprintf(stderr,"Parâmetros inválidos: max_iter>0 e eps>0\n");
-      MPI_Abort(MPI_COMM_WORLD, 1);
-      return 1;
+      MPI_Abort(MPI_COMM_WORLD, -1);
+      return -1;
     }
 
     MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
@@ -209,8 +210,8 @@ int main(int argc, char **argv){
       fprintf(stderr,"Sem memoria para X local\n");
       free(X);
       free(C);
-      MPI_Abort(MPI_COMM_WORLD, 1);
-      return 1;
+      MPI_Abort(MPI_COMM_WORLD, -1);
+      return -1;
     }
 
     int *sendcounts = NULL; 
@@ -238,6 +239,7 @@ int main(int argc, char **argv){
       fprintf(stderr,"Sem memoria para assign\n");
       free(X);
       free(C);
+      MPI_Abort(MPI_COMM_WORLD, -1);
       return 1;
     }
 
