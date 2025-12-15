@@ -14,8 +14,20 @@ mpirun -np 2 ./kmeans_1d_mpi dados_big.csv centroides_k64.csv 50 0.000001 assign
 
 ## Em vários hosts
 
-### Configuração
-É necessário ter uma conexão SSH direta entre os hosts e configurar o arquivo `hosts`, com o endereço de IP local e o número de cores de cada dispositivo (através de `slots`). 
+### Configuração e Preparação
+Antes de executar, você precisa ter a biblioteca do MPI instalado em seu host.
+
+### Ubuntu/Debian
+```bash
+sudo apt install openmpi-bin openmpi-dev openmpi-common openmpi-doc libopenmpi-dev
+```
+
+### Arch Linux
+```bash
+sudo pacman -S openmpi
+```
+
+Também é necessário ter uma conexão SSH direta entre os hosts e configurar o arquivo `hosts`, com o endereço de IP local e o número de cores de cada dispositivo (através de `slots`). 
 ```
 192.168.0.25 slots=8
 192.168.0.28 slots=2
