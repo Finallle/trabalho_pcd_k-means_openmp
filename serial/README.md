@@ -6,7 +6,7 @@
 make naive
 ```
 
-ou com o compilador GCC diretamente.
+ou diretamente pelo compilador GCC.
 
 ```bash
 gcc -O2 -std=c99 kmeans_1d_naive.c -o kmeans_1d_naive -lm
