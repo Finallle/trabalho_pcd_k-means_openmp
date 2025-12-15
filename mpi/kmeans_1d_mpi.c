@@ -247,18 +247,22 @@ int main(int argc, char **argv){
     if(processId == mainId) first_point = X[0];
     MPI_Bcast(&first_point, 1, MPI_DOUBLE, mainId, MPI_COMM_WORLD);
 
-    double start = MPI_Wtime();
+    double start, end;
+
+    if(processId == mainId) start = MPI_Wtime();
+
     kmeans_1d(X_local, C, assign, divpoints, K, max_iter, eps, &iters, &sse, mainId, first_point);
-    double end = MPI_Wtime() - start;
+
+    if(processId == mainId) end = MPI_Wtime() - start;
 
     MPI_Finalize();
 
     if(processId == mainId) {
       printf("K-means 1D (MPI)\n");
       printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
-      printf("Iterações: %d | SSE final: %.6f | Tempo: %.4f s\n", iters, sse, end);
-      write_assign_csv(outAssign, assign, N);
-      write_centroids_csv(outCentroid, C, K);
+      printf("Iterações: %d | SSE final: %.6f | Tempo: %f ms\n", iters, sse, end / 1000.0);
+      //write_assign_csv(outAssign, assign, N);
+      //write_centroids_csv(outCentroid, C, K);
     }
 
     free(assign); 
