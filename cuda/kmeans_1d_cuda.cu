@@ -32,29 +32,51 @@ static int count_rows(const char *path){
 }
 
 static float *read_csv_1col_float(const char *path, int *n_out){
+    
     int R = count_rows(path);
-    if(R<=0){ fprintf(stderr,"Arquivo vazio: %s\n", path); exit(1); }
+    if(R<=0){
+        fprintf(stderr,"Arquivo vazio: %s\n", path);
+        exit(1);
+     }
     float *A = (float*)malloc((size_t)R * sizeof(float));
-    if(!A){ fprintf(stderr,"Sem memoria para %d linhas\n", R); exit(1); }
+    
+    if(!A){
+        fprintf(stderr,"Sem memoria para %d linhas\n", R); 
+        exit(1); 
+    }
 
     FILE *f = fopen(path, "r");
-    if(!f){ fprintf(stderr,"Erro ao abrir %s\n", path); free(A); exit(1); }
+    if(!f){ 
+        fprintf(stderr,"Erro ao abrir %s\n", path);
+        free(A);
+        exit(1); 
+    }
 
     char line[8192];
     int r=0;
     while(fgets(line,sizeof(line),f)){
         int only_ws=1;
+
         for(char *p=line; *p; p++){
             if(*p!=' ' && *p!='\t' && *p!='\n' && *p!='\r'){ only_ws=0; break; }
         }
-        if(only_ws) continue;
+        if(only_ws) 
+            continue;
 
         const char *delim = ",; \t";
         char *tok = strtok(line, delim);
-        if(!tok){ fprintf(stderr,"Linha %d sem valor em %s\n", r+1, path); free(A); fclose(f); exit(1); }
-        A[r] = (float)atof(tok);
+        
+        if(!tok){
+             fprintf(stderr,"Linha %d sem valor em %s\n", r+1, path); 
+             free(A); 
+             fclose(f); 
+             exit(1); }
+        
+             A[r] = (float)atof(tok);
         r++;
-        if(r>=R) break;
+        
+        if(r>=R) 
+            break;
     }
     fclose(f);
     *n_out = r;
@@ -62,18 +84,30 @@ static float *read_csv_1col_float(const char *path, int *n_out){
 }
 
 static void write_assign_csv(const char *path, const int *assign, int N){
-    if(!path) return;
+    if(!path) 
+        return;
+    
     FILE *f = fopen(path, "w");
+    
     if(!f){ fprintf(stderr,"Erro ao abrir %s para escrita\n", path); return; }
-    for(int i=0;i<N;i++) fprintf(f, "%d\n", assign[i]);
+    
+    for(int i=0;i<N;i++) 
+    fprintf(f, "%d\n", assign[i]);
+    
     fclose(f);
 }
 
 static void write_centroids_csv_f(const char *path, const float *C, int K){
-    if(!path) return;
+    
+    if(!path) 
+        return;
     FILE *f = fopen(path, "w");
-    if(!f){ fprintf(stderr,"Erro ao abrir %s para escrita\n", path); return; }
-    for(int c=0;c<K;c++) fprintf(f, "%.6f\n", (double)C[c]);
+    
+    if(!f){
+         fprintf(stderr,"Erro ao abrir %s para escrita\n", path); 
+            return; }
+    for(int c=0;c<K;c++) 
+        fprintf(f, "%.6f\n", (double)C[c]);
     fclose(f);
 }
 
