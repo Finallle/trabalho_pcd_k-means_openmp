@@ -11,7 +11,7 @@ sudo pacman -S openmp
 ## Execução
 
 ```bash
-make omp
+make
 ```
 
 ou diretamente pelo compilador GCC.
